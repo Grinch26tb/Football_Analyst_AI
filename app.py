@@ -1,37 +1,89 @@
 import streamlit as st
 import pandas as pd
-import io
-st.set_page_config(page_title='Football Analytics AI',page_icon='⚽',layout='centered')
-st.title('⚽ Football Analytics AI')
-st.caption('Analisi descrittiva delle partite già disputate')
-example='Data,Casa,Trasferta,GolCasa,GolTrasferta\n2024-01-01,Alfa,Beta,2,1\n2024-01-08,Beta,Gamma,0,0\n2024-01-15,Gamma,Alfa,1,3\n2024-01-22,Beta,Alfa,2,2\n2024-01-29,Alfa,Gamma,1,0\n'
-f=st.file_uploader('Carica un CSV di risultati storici',type=['csv'])
-st.download_button('Scarica CSV di esempio',example,'esempio.csv','text/csv')
+from urllib.request import urlopen, Request
+from io import BytesIO
+from datetime import date
+
+st.set_page_config(page_title='Football Analytics AI 2.0', page_icon='⚽', layout='centered')
+st.title('⚽ Football Analytics AI 2.0')
+st.caption('Analisi descrittiva dei risultati storici')
+leagues={'Serie A':'I1','Serie B':'I2','Premier League':'E0','Liga':'SP1','Bundesliga':'D1','Ligue 1':'F1'}
+cols=['Data','Casa','Trasferta','GolCasa','GolTrasferta']
+@st.cache_data(ttl=3600)
+def load(url):
+    with urlopen(Request(url,headers={'User-Agent':'Football Analytics historical viewer'}),timeout=25) as r:
+        return pd.read_csv(BytesIO(r.read()),encoding='latin1')
+source=st.radio('Fonte dati',['CSV personale','Archivio online'],index=0,horizontal=True)
+if source=='Archivio online':
+    league=st.selectbox('Campionato',list(leagues))
+    year=st.selectbox('Stagione',list(range(2025,2018,-1)),format_func=lambda y:f'{y}/{y+1}')
+    url=f'https://www.football-data.co.uk/mmz4281/{year%100:02d}{(year+1)%100:02d}/{leagues[league]}.csv'
+    st.caption('Fonte: Football-Data.co.uk. Usa questa fonte solo se le condizioni di utilizzo lo consentono.')
+    st.markdown('[Archivio originale](https://www.football-data.co.uk/data.php)')
+    if not st.checkbox('Ho verificato le condizioni di utilizzo della fonte'):
+        st.stop()
+    if st.button('Ricarica archivio'):
+        load.clear()
+    try:
+        raw=load(url)
+    except Exception:
+        st.error('Archivio non raggiungibile. Riprova oppure usa un CSV personale.')
+        st.stop()
+else:
+    f=st.file_uploader('Carica risultati storici CSV',type=['csv'])
+    st.download_button('Scarica modello CSV','Data,Casa,Trasferta,GolCasa,GolTrasferta\n','modello.csv','text/csv')
+    if f is None:
+        st.info('Carica un CSV oppure scegli Archivio online.')
+        st.stop()
+    try:
+        raw=pd.read_csv(f)
+    except Exception:
+        st.error('CSV non leggibile.'); st.stop()
 try:
- d=pd.read_csv(f if f else io.StringIO(example))
- d=d[['Data','Casa','Trasferta','GolCasa','GolTrasferta']].copy()
- d['Data']=pd.to_datetime(d.Data,errors='raise')
- for c in ['GolCasa','GolTrasferta']:
-  d[c]=pd.to_numeric(d[c],errors='raise')
-  if d[c].isna().any() or (d[c]<0).any() or (d[c]%1!=0).any(): raise ValueError('Gol non validi')
- if d.empty or d[['Data','Casa','Trasferta']].isna().any().any() or (d.Casa==d.Trasferta).any() or (d.Data.dt.date>pd.Timestamp.today().date()).any(): raise ValueError('Dati non validi')
+    d=raw.rename(columns=dict(Date='Data',HomeTeam='Casa',AwayTeam='Trasferta',FTHG='GolCasa',FTAG='GolTrasferta'))[cols].copy()
+    d['Data']=pd.to_datetime(d.Data,format='mixed',dayfirst=True,errors='coerce')
+    for c in ['GolCasa','GolTrasferta']:
+        d[c]=pd.to_numeric(d[c],errors='coerce')
+    d=d.dropna().copy()
+    d=d[(d.Data.dt.date<=date.today())&(d.Casa!=d.Trasferta)]
+    for c in ['GolCasa','GolTrasferta']:
+        d=d[(d[c]>=0)&(d[c]%1==0)]
+        d[c]=d[c].astype(int)
+    d=d.drop_duplicates().sort_values('Data')
+    if d.empty: raise ValueError()
 except Exception:
- st.error('CSV non valido. Usa le colonne del file di esempio e solo risultati conclusi.'); st.stop()
-if not f: st.info('Stai visualizzando dati inventati a scopo dimostrativo.')
-a=d[['Data','Casa','GolCasa','GolTrasferta']].set_axis(['Data','Squadra','Fatti','Subiti'],axis=1)
-b=d[['Data','Trasferta','GolTrasferta','GolCasa']].set_axis(['Data','Squadra','Fatti','Subiti'],axis=1)
+    st.error('Nessun risultato valido o colonne CSV mancanti.'); st.stop()
+a=d[['Data','Casa','GolCasa','GolTrasferta']].set_axis(['Data','Squadra','Fatti','Subiti'],axis=1).assign(Campo='Casa')
+b=d[['Data','Trasferta','GolTrasferta','GolCasa']].set_axis(['Data','Squadra','Fatti','Subiti'],axis=1).assign(Campo='Trasferta')
 t=pd.concat([a,b],ignore_index=True).sort_values('Data')
 t['Vittorie']=(t.Fatti>t.Subiti).astype(int)
 t['Pareggi']=(t.Fatti==t.Subiti).astype(int)
 t['Sconfitte']=(t.Fatti<t.Subiti).astype(int)
-summary=t.groupby('Squadra').agg(Partite=('Fatti','size'),Gol_fatti=('Fatti','sum'),Gol_subiti=('Subiti','sum'),Vittorie=('Vittorie','sum'),Pareggi=('Pareggi','sum'),Sconfitte=('Sconfitte','sum'))
+def summary(x):
+    s=x.groupby('Squadra').agg(Partite=('Fatti','size'),Gol_fatti=('Fatti','sum'),Gol_subiti=('Subiti','sum'),Vittorie=('Vittorie','sum'),Pareggi=('Pareggi','sum'),Sconfitte=('Sconfitte','sum'))
+    s['Punti']=3*s.Vittorie+s.Pareggi
+    s['Differenza reti']=s.Gol_fatti-s.Gol_subiti
+    return s.sort_values(['Punti','Differenza reti','Gol_fatti'],ascending=False)
+s=summary(t)
+st.caption(f'Risultati dal {d.Data.min():%d/%m/%Y} al {d.Data.max():%d/%m/%Y}')
 page=st.radio('Sezione',['Dashboard','Squadre','Confronto','Archivio'],horizontal=True)
 if page=='Dashboard':
- c1,c2=st.columns(2); c1.metric('Partite',len(d)); c2.metric('Gol totali',int(d.GolCasa.sum()+d.GolTrasferta.sum()))
- st.dataframe(summary,use_container_width=True)
+    c1,c2=st.columns(2); c1.metric('Partite',len(d)); c2.metric('Gol totali',int(d.GolCasa.sum()+d.GolTrasferta.sum()))
+    st.caption('Graduatoria calcolata dai risultati: non considera penalizzazioni o criteri ufficiali di spareggio.')
+    st.dataframe(s)
 elif page=='Squadre':
- s=st.selectbox('Squadra',summary.index); x=t[t.Squadra==s]; st.dataframe(summary.loc[[s]]); st.line_chart(x.groupby('Data')[['Fatti','Subiti']].sum()); st.dataframe(x.drop(columns='Squadra'),hide_index=True)
+    team=st.selectbox('Squadra',sorted(s.index))
+    x=t[t.Squadra==team]
+    campo=st.radio('Campo',['Tutti','Casa','Trasferta'],horizontal=True)
+    if campo!='Tutti': x=x[x.Campo==campo]
+    n=st.selectbox('Periodo',['Tutte',5,10]); x=x if n=='Tutte' else x.tail(n)
+    st.dataframe(summary(x)); st.line_chart(x.groupby('Data')[['Fatti','Subiti']].sum()); st.dataframe(x.drop(columns='Squadra'),hide_index=True)
 elif page=='Confronto':
- s=st.multiselect('Squadre',summary.index,default=list(summary.index[:2])); st.bar_chart(summary.loc[s,['Gol_fatti','Gol_subiti']]); st.dataframe(summary.loc[s])
+    teams=st.multiselect('Squadre',sorted(s.index),default=list(s.index[:2]))
+    if teams:
+        st.bar_chart(s.loc[teams,['Gol_fatti','Gol_subiti']]); st.dataframe(s.loc[teams])
+    if len(teams)==2:
+        st.subheader('Scontri diretti nella stagione selezionata')
+        st.dataframe(d[d.Casa.isin(teams)&d.Trasferta.isin(teams)],hide_index=True)
 else:
- st.dataframe(d.sort_values('Data',ascending=False),hide_index=True)
+    st.dataframe(d.sort_values('Data',ascending=False),hide_index=True)
